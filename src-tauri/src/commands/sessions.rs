@@ -5,7 +5,7 @@
 //! - 对话内容存 JSONL 文件(`data/sessions/<id>.jsonl`),每行一条消息
 //! - 前端 AgentMessage 直接序列化存盘,加载时反序列化恢复
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,7 +37,7 @@ pub struct AgentSessionInfo {
 }
 
 /// 获取 data/sessions 目录路径(不存在则创建)
-fn sessions_dir(data_dir: &PathBuf) -> AppResult<PathBuf> {
+fn sessions_dir(data_dir: &Path) -> AppResult<PathBuf> {
     let dir = data_dir.join("sessions");
     std::fs::create_dir_all(&dir)
         .map_err(|e| AppError::Internal(format!("创建 sessions 目录失败: {e}")))?;
@@ -72,7 +72,7 @@ fn validate_session_id(session_id: &str) -> AppResult<()> {
 }
 
 /// JSONL 文件路径(内部再校验一次 id,纵深防御)
-fn transcript_path(data_dir: &PathBuf, session_id: &str) -> AppResult<PathBuf> {
+fn transcript_path(data_dir: &Path, session_id: &str) -> AppResult<PathBuf> {
     validate_session_id(session_id)?;
     Ok(sessions_dir(data_dir)?.join(format!("{session_id}.jsonl")))
 }

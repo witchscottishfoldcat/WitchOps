@@ -5,7 +5,5 @@
 # 经测试,用户 Documents 目录放行 build script 执行。
 # 因此把 target 目录指到 Documents 下。源码仍在 D:\ADM\witchcat-ops。
 
-[build]
-# 注意:此路径为绝对路径(含用户名),换机器/换用户需调整。
-# 不能用 ${USERPROFILE} 等环境变量:cargo 不会展开 target-dir 中的变量,会按字面量建目录。
-target-dir = "C:/Users/92964/Documents/witchcat-ops-target"
+# 不在仓库中写死用户名。若本机 WDAC 要求把构建产物放到 Documents，运行前设置：
+#   $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE 'Documents/witchcat-ops-target'

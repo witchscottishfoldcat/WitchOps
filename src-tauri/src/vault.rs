@@ -36,7 +36,6 @@ const KEYCHAIN_DATA_KEY_USER: &str = "vault-data-key";
 
 /// 加密后的密文结构:nonce(12) + 密文(含 tag),统一 base64 编码
 /// 解密时前 12 字节是 nonce,其余是密文。
-
 /// Vault 状态(运行时,保存在内存,进程重启需重新解锁)
 #[derive(Clone)]
 pub struct Vault {

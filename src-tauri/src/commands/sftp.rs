@@ -4,13 +4,13 @@
 //! (实现简单;若需高频操作,可后续优化为复用 session)
 //!
 //! 设计约定:所有**写操作**(write/delete/mkdir/rmdir/rename)必须调用
-//! [`crate::executor::log_action`] 留审计痕迹 —— 与"一切命令皆审计"的统一出口原则一致。
+//! [`crate::executor::begin_audit_action`] 先登记操作，再执行并补齐结果。
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::executor::{log_action, AuditContext};
+use crate::executor::{begin_audit_action, finish_audit_action, AuditContext};
 use crate::AppState;
 
 /// 查询服务器 host(用于审计记录),失败返回空串
@@ -26,8 +26,8 @@ async fn fetch_server_host(state: &State<'_, AppState>, server_id: i64) -> Strin
         .unwrap_or_default()
 }
 
-/// 写操作执行 + 审计的公共包装:
-/// 无论成功失败都写审计日志;审计写库失败只告警,不吞掉操作结果。
+/// 写操作执行 + 审计的公共包装。先登记 pending，登记失败则不执行远端操作；
+/// 操作完成后补齐结果，补写失败时明确提示用户人工核对。
 async fn audit_sftp_action(
     state: &State<'_, AppState>,
     server_id: i64,
@@ -46,23 +46,34 @@ async fn audit_sftp_action(
         proposal_id: None,
     };
 
+    let audit_id = begin_audit_action(
+        state.db(),
+        Some(server_id),
+        Some(&server_host),
+        None,
+        &ctx,
+    )
+    .await?;
+    let start = std::time::Instant::now();
     let result = op.await;
+    let duration_ms = start.elapsed().as_millis() as i64;
     let (success, output) = match &result {
         Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     };
-    match log_action(
+    if let Err(e) = finish_audit_action(
         state.db(),
-        Some(server_id),
-        Some(&server_host),
-        success,
+        audit_id,
+        if success { "succeeded" } else { "unknown" },
+        None,
         output.as_deref(),
-        &ctx,
+        success,
+        duration_ms,
     )
-    .await
-    {
-        Ok(_) => {}
-        Err(e) => log::warn!("SFTP {tool_name} 审计写库失败: {e}"),
+    .await {
+        return Err(AppError::Internal(format!(
+            "SFTP 操作可能已执行，但审计结果更新失败（audit_id={audit_id}）：{e}。请人工核对后再操作"
+        )));
     }
     result
 }
@@ -208,15 +219,24 @@ pub async fn write_file_with_ctx(
     ctx: AuditContext,
 ) -> AppResult<i64> {
     let server_host = fetch_server_host(state, server_id).await;
-    // args 缺省时补 {"path": ...}(sftp_write_file 路径);Agent 路径 ctx.args 已含完整参数 JSON
+    // 审计只保存路径和长度。文件正文仍保留在提案执行快照中，但不能复制到审计、文档或模型摘要。
     let ctx = AuditContext {
-        args: Some(
-            ctx.args
-                .unwrap_or_else(|| serde_json::json!({ "path": path }).to_string()),
-        ),
+        args: Some(serde_json::json!({
+            "path": path,
+            "content_chars": content.chars().count()
+        }).to_string()),
         ..ctx
     };
 
+    let audit_id = begin_audit_action(
+        state.db(),
+        Some(server_id),
+        Some(&server_host),
+        None,
+        &ctx,
+    )
+    .await?;
+    let start = std::time::Instant::now();
     let result: AppResult<()> = async {
         let sftp = state.ssh.open_sftp(server_id).await?;
 
@@ -239,33 +259,26 @@ pub async fn write_file_with_ctx(
         Ok(())
     }
     .await;
+    let duration_ms = start.elapsed().as_millis() as i64;
 
     let (success, output) = match &result {
         Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     };
-    let audit_id = match log_action(
+    if let Err(e) = finish_audit_action(
         state.db(),
-        Some(server_id),
-        Some(&server_host),
-        success,
+        audit_id,
+        if success { "succeeded" } else { "unknown" },
+        None,
         output.as_deref(),
-        &ctx,
+        success,
+        duration_ms,
     )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            if ctx.source == "agent" {
-                // fail-closed:文件已写入但审计缺失时,必须让 Agent 流程拿到明确错误
-                return Err(AppError::Internal(format!(
-                    "文件已写入服务器 {server_id},但审计日志写入失败: {e}"
-                )));
-            }
-            log::warn!("SFTP {} 审计写库失败: {e}", ctx.tool_name);
-            0
-        }
-    };
+    .await {
+        return Err(AppError::Internal(format!(
+            "文件可能已写入服务器 {server_id}，但审计结果更新失败（audit_id={audit_id}）：{e}。请人工核对后再操作"
+        )));
+    }
     result?;
     Ok(audit_id)
 }

@@ -1,7 +1,7 @@
 //! 统一执行出口 —— 安全命脉
 //!
-//! 借鉴 MaidKit:所有命令执行(不管来源是 Agent / 手动终端 / 快捷指令 / 外部 MCP),
-//! **都必须经过 [`execute_and_audit`]**,保证审计日志无遗漏。
+//! Agent、快捷指令与服务控制等结构化命令必须经过 [`execute_and_audit`]。
+//! 交互式 PTY 具有不同语义，只记录会话生命周期，默认不保存可能包含密码的输入行。
 //!
 //! 这对应 MaidKit 的 `ssh_agent_service.dart::executeProposal` 的执行部分,
 //! 但扩展为跨来源的统一入口。
@@ -52,6 +52,8 @@ pub struct AuditLog {
     pub exit_code: Option<i32>,
     pub output: Option<String>,
     pub success: bool,
+    /// pending / succeeded / failed / unknown
+    pub outcome: String,
     pub approved_by: Option<String>,
     pub proposal_id: Option<String>,
     pub duration_ms: Option<i64>,
@@ -74,8 +76,6 @@ pub async fn execute_and_audit(
     command: &str,
     ctx: &AuditContext,
 ) -> AppResult<(CommandResult, i64)> {
-    let start = std::time::Instant::now();
-
     // debug 级:命令串可能内嵌密码/令牌等敏感信息,不能进 info 日志
     log::debug!(
         "[audit] 执行 server={server_id} tool={} source={} cmd={:?}",
@@ -84,54 +84,49 @@ pub async fn execute_and_audit(
         command
     );
 
-    // 执行命令
+    // 先落执行意图。此处失败就不向远端发送命令，避免产生无记录的变更。
+    let audit_id = begin_audit_action(
+        db,
+        Some(server_id),
+        Some(server_host),
+        ctx.command.as_deref().or(Some(command)),
+        ctx,
+    )
+    .await?;
+
+    let start = std::time::Instant::now();
     let result = ssh.run_command(server_id, command).await;
     let duration_ms = start.elapsed().as_millis() as i64;
 
-    let (success, exit_code, _output, truncated_output) = match &result {
+    let (success, outcome, exit_code, output) = match &result {
         Ok(r) => {
             let combined = r.combined_output();
-            let truncated = truncate_output(&combined);
-            (r.success(), Some(r.exit_code), Some(combined), truncated)
+            (
+                r.success(),
+                if r.success() { "succeeded" } else { "failed" },
+                Some(r.exit_code),
+                combined,
+            )
         }
-        Err(e) => (false, None, Some(e.to_string()), truncate_output(&e.to_string())),
+        // SSH 错误可能发生在命令发出之后，保守标 unknown，禁止调用方自动重试。
+        Err(e) => (false, "unknown", None, e.to_string()),
     };
 
-    // 写审计日志(fail-closed:命令已经执行,审计却写不进去时,
-    // 宁可让调用方拿到明确的错误,也不能静默返回一个无审计的执行结果)
-    let timestamp = Utc::now().to_rfc3339();
-    let audit_id = match write_audit_log(
+    if let Err(e) = finish_audit_action(
         db,
-        &timestamp,
-        ctx.session_id.as_deref(),
-        Some(server_id),
-        Some(server_host),
-        &ctx.source,
-        &ctx.tool_name,
-        ctx.command.as_deref().or(Some(command)),
-        ctx.args.as_deref(),
+        audit_id,
+        outcome,
         exit_code,
-        Some(&truncated_output),
+        Some(&output),
         success,
-        ctx.approved_by.as_deref(),
-        ctx.proposal_id.as_deref(),
         duration_ms,
     )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!(
-                "审计日志写入失败(命令已执行,server={server_id}): {e}"
-            );
-            return Err(AppError::Internal(format!(
-                "命令已在服务器 {server_id} 上执行,但审计日志写入失败: {e}\
-                 (exit_code={}, output={}),请人工核对审计缺口",
-                exit_code.map(|c| c.to_string()).unwrap_or_else(|| "无".into()),
-                truncated_output
-            )));
-        }
-    };
+    .await {
+        log::error!("审计结果更新失败(命令可能已执行,server={server_id},audit={audit_id}): {e}");
+        return Err(AppError::Internal(format!(
+            "命令可能已在服务器 {server_id} 上执行，但审计结果更新失败（audit_id={audit_id}）：{e}。请人工核对后再操作"
+        )));
+    }
 
     let result = result?;
     Ok((result, audit_id))
@@ -162,11 +157,77 @@ pub async fn log_action(
         None,
         truncated.as_deref(),
         success,
+        if success { "succeeded" } else { "failed" },
         ctx.approved_by.as_deref(),
         ctx.proposal_id.as_deref(),
         0,
     )
     .await
+}
+
+/// 在操作开始前创建 pending 审计。失败时调用方不得执行远端变更。
+pub async fn begin_audit_action(
+    db: &SqlitePool,
+    server_id: Option<i64>,
+    server_host: Option<&str>,
+    command: Option<&str>,
+    ctx: &AuditContext,
+) -> AppResult<i64> {
+    let timestamp = Utc::now().to_rfc3339();
+    write_audit_log(
+        db,
+        &timestamp,
+        ctx.session_id.as_deref(),
+        server_id,
+        server_host,
+        &ctx.source,
+        &ctx.tool_name,
+        command.or(ctx.command.as_deref()),
+        ctx.args.as_deref(),
+        None,
+        None,
+        false,
+        "pending",
+        ctx.approved_by.as_deref(),
+        ctx.proposal_id.as_deref(),
+        0,
+    )
+    .await
+}
+
+/// 补齐已经登记的审计结果。
+pub async fn finish_audit_action(
+    db: &SqlitePool,
+    audit_id: i64,
+    outcome: &str,
+    exit_code: Option<i32>,
+    output: Option<&str>,
+    success: bool,
+    duration_ms: i64,
+) -> AppResult<()> {
+    if !matches!(outcome, "succeeded" | "failed" | "unknown") {
+        return Err(AppError::InvalidInput(format!("非法审计结果状态: {outcome}")));
+    }
+    let truncated = output.map(truncate_output);
+    let changed = sqlx::query(
+        "UPDATE audit_logs
+         SET outcome=?, exit_code=?, output=?, success=?, duration_ms=?
+         WHERE id=? AND outcome='pending'",
+    )
+    .bind(outcome)
+    .bind(exit_code)
+    .bind(truncated)
+    .bind(success)
+    .bind(duration_ms)
+    .bind(audit_id)
+    .execute(db)
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(AppError::Internal(format!(
+            "审计记录 {audit_id} 不存在或已经完成"
+        )));
+    }
+    Ok(())
 }
 
 /// 截断输出到 OUTPUT_TRUNCATE 字符
@@ -202,6 +263,7 @@ async fn write_audit_log(
     exit_code: Option<i32>,
     output: Option<&str>,
     success: bool,
+    outcome: &str,
     approved_by: Option<&str>,
     proposal_id: Option<&str>,
     duration_ms: i64,
@@ -211,8 +273,8 @@ async fn write_audit_log(
     let row = sqlx::query(
         "INSERT INTO audit_logs
             (timestamp, session_id, server_id, server_host, source, tool_name,
-             command, args, exit_code, output, success, approved_by, proposal_id, duration_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             command, args, exit_code, output, success, outcome, approved_by, proposal_id, duration_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING id",
     )
     .bind(timestamp)
@@ -226,6 +288,7 @@ async fn write_audit_log(
     .bind(exit_code)
     .bind(output)
     .bind(success)
+    .bind(outcome)
     .bind(approved_by)
     .bind(proposal_id)
     .bind(duration_ms)

@@ -142,10 +142,12 @@ export const DocsHub: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 10, borderTop: '1px solid var(--border-color)' }}>
               <button
                 className="btn btn-primary"
-                style={{ fontSize: 11, padding: '4px 10px', background: 'linear-gradient(135deg, var(--accent-pink), var(--accent-purple))' }}
+                style={{ fontSize: 11, padding: '4px 10px', background: 'linear-gradient(135deg, var(--accent-pink), var(--accent-purple))', opacity: doc.status === 'reviewed' ? 1 : 0.5 }}
                 onClick={() => convertDocToSkill(doc.id, doc.title)}
+                disabled={doc.status !== 'reviewed'}
+                title={doc.status === 'reviewed' ? '创建一个默认停用的技能草稿' : '请先将文档推进到 reviewed 状态'}
               >
-                <BookOpen size={12} /> 存为 SOP 技能
+                <BookOpen size={12} /> 转为技能草稿
               </button>
 
               <div style={{ display: 'flex', gap: 6 }}>

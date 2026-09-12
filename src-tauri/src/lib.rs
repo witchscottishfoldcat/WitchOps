@@ -135,6 +135,21 @@ pub const ENC_PREFIX: &str = "enc:v1:";
 /// 明文前缀(Vault 未启用时的本地存储)
 pub const PLAIN_PREFIX: &str = "plain:";
 
+fn copy_legacy_data_dir(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_legacy_data_dir(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化日志
@@ -147,37 +162,46 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // 数据目录:项目文件夹内(随项目走,可迁移/可备份)
-            // 优先级:WITCHCAT_DATA_DIR 环境变量 > 项目根目录/data
-            // (CARGO_MANIFEST_DIR 在编译期确定 = src-tauri,其父目录即项目根)
-            let data_dir = std::env::var("WITCHCAT_DATA_DIR")
+            // 发布版使用运行时应用数据目录，不能依赖编译机器的源码路径。
+            // WITCHCAT_DATA_DIR 仍可用于便携安装或测试环境。
+            let explicit_data_dir = std::env::var("WITCHCAT_DATA_DIR").ok();
+            let data_dir = explicit_data_dir
+                .as_ref()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-                    manifest
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or(manifest)
-                        .join("data")
-                });
+                .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)
                 .expect("无法创建项目数据目录");
 
-            // 旧位置(%APPDATA%/com.witchcat.ops)数据迁移:项目内无库而旧库存在 → 整体搬过来
-            let new_db = data_dir.join("app.db");
-            if !new_db.exists() {
-                if let Ok(old_dir) = app.path().app_data_dir() {
-                    let old_db = old_dir.join("app.db");
-                    if old_db.exists() {
-                        for suffix in ["", "-wal", "-shm"] {
-                            let from = old_dir.join(format!("app.db{suffix}"));
-                            let to = data_dir.join(format!("app.db{suffix}"));
-                            if from.exists() {
-                                let _ = std::fs::copy(&from, &to);
-                            }
+            // 0.1.0 曾把应用数据目录复制到源码目录后继续在那里写入，因此两边同时存在时
+            // 源码目录通常更新。首次升级先备份当前应用目录，再完整导入旧目录并写迁移标记。
+            if explicit_data_dir.is_none() {
+                let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                let legacy_dir = manifest.parent().unwrap_or(&manifest).join("data");
+                let migration_marker = data_dir.join(".legacy-project-data-imported");
+                if legacy_dir.join("app.db").exists()
+                    && legacy_dir != data_dir
+                    && !migration_marker.exists()
+                {
+                    if data_dir.join("app.db").exists() {
+                        let dir_name = data_dir
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or("witchcat-ops-data");
+                        let backup_dir = data_dir.with_file_name(format!(
+                            "{dir_name}.pre-legacy-import"
+                        ));
+                        if !backup_dir.exists() {
+                            copy_legacy_data_dir(&data_dir, &backup_dir)?;
+                            log::warn!("导入旧数据前的应用数据备份: {}", backup_dir.display());
                         }
-                        log::info!("已从旧位置迁移数据库: {} → {}", old_db.display(), new_db.display());
                     }
+                    copy_legacy_data_dir(&legacy_dir, &data_dir)?;
+                    std::fs::write(&migration_marker, b"imported\n")?;
+                    log::info!(
+                        "已复制旧版数据目录: {} → {}（旧副本已保留）",
+                        legacy_dir.display(),
+                        data_dir.display()
+                    );
                 }
             }
 
@@ -223,7 +247,6 @@ pub fn run() {
             commands::confirm_host_key,
             commands::disconnect_server,
             commands::server_connection_status,
-            commands::execute_command,
             // providers(LLM 配置)
             commands::list_providers,
             commands::get_provider,
@@ -254,6 +277,7 @@ pub fn run() {
             commands::list_quick_actions,
             commands::upsert_quick_action,
             commands::delete_quick_action,
+            commands::execute_quick_action,
             // docs
             commands::list_docs,
             commands::get_doc,

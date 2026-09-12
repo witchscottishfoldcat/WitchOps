@@ -7,7 +7,7 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Server, ServerInput, AuditLog, AuditFilter, Skill, QuickAction, Doc,
   ProviderSummary, ProviderInput, Container, ContainerAction, Service, ServerMetrics,
-  DirEntry, AuditContext, ExecuteResult, AgentExecutionResult,
+  DirEntry, ExecuteResult, AgentExecutionResult, QuickActionExecutionResult,
   ChatRequest, ChatEvent,
 } from '../types/backend';
 
@@ -86,16 +86,13 @@ export const confirmHostKey = (id: number, fingerprint: string) =>
 export const disconnectServer = (id: number) => invoke<void>('disconnect_server', { id });
 export const serverConnectionStatus = (id: number) =>
   invoke<boolean>('server_connection_status', { id });
-export const executeCommand = (serverId: number, command: string, ctx: AuditContext) =>
-  invoke<ExecuteResult>('execute_command', { serverId, command, ctx });
-
 // ============ 审计日志 ============
 export const queryAuditLogs = (filter: AuditFilter) =>
   invoke<AuditLog[]>('query_audit_logs', { filter });
 export const getSessionAuditLogs = (sessionId: string) =>
   invoke<AuditLog[]>('get_session_audit_logs', { sessionId });
 export const auditStats = () =>
-  invoke<{ total: number; success: number; failed: number }>('audit_stats');
+  invoke<{ total: number; success: number; failed: number; unknown: number; pending: number }>('audit_stats');
 
 // ============ Skills ============
 export const listSkills = () => invoke<Skill[]>('list_skills');
@@ -111,6 +108,14 @@ export const listQuickActions = () => invoke<QuickAction[]>('list_quick_actions'
 export const upsertQuickAction = (action: QuickAction) =>
   invoke<void>('upsert_quick_action', { action });
 export const deleteQuickAction = (id: string) => invoke<void>('delete_quick_action', { id });
+export const executeQuickAction = (
+  actionId: string,
+  serverId: number,
+  expectedUpdatedAt: string,
+  userConfirmed: boolean,
+) => invoke<QuickActionExecutionResult>('execute_quick_action', {
+  actionId, serverId, expectedUpdatedAt, userConfirmed,
+});
 
 // ============ 文档 ============
 export const listDocs = () => invoke<Doc[]>('list_docs');

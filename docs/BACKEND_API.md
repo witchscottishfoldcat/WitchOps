@@ -1,6 +1,6 @@
 # Witchcat Ops 后端 IPC 契约(前端对接文档)
 
-> 本文档供**前端 Agent** 对接后端使用。后端是 Tauri 2 + Rust,**57 个命令**全部通过 `invoke()` 暴露,编译通过。
+> 本文档供前端对接 Tauri 2 + Rust 后端使用。命令按业务域通过 `invoke()` 暴露。
 >
 > **调用方式**:`import { invoke } from '@tauri-apps/api/core'`
 > ```ts
@@ -117,27 +117,8 @@ interface ServerInput {
 ### `server_connection_status(id: number) → boolean`
 是否已连接。
 
-### `execute_command(server_id: number, command: string, ctx: AuditContext) → ExecuteResult`
-**统一执行出口** —— 所有命令执行走这里,自动写审计日志。
-```ts
-interface AuditContext {
-  source: 'agent' | 'manual_terminal' | 'quick_action' | 'mcp_external'
-  session_id?: string
-  tool_name: string         // 'run_command' 等
-  command?: string
-  args?: string             // JSON 字符串
-  approved_by?: string      // 'user:zhang' 或 'policy:auto_review'
-  proposal_id?: string
-}
-
-interface ExecuteResult {
-  audit_id: number
-  stdout: string
-  stderr: string
-  exit_code: number
-  success: boolean
-}
-```
+命令执行不暴露接受任意 `source/approved_by` 的通用 IPC。Agent、快捷指令、
+容器与服务操作分别使用专用命令，由后端构造可信审计上下文并调用内部统一执行器。
 
 ---
 
@@ -170,6 +151,7 @@ interface AuditLog {
   exit_code: number | null
   output: string | null     // 截断到 2000 字符
   success: boolean
+  outcome: 'pending' | 'succeeded' | 'failed' | 'unknown'
   approved_by: string | null
   proposal_id: string | null
   duration_ms: number | null
@@ -179,7 +161,7 @@ interface AuditLog {
 ### `get_session_audit_logs(session_id: string) → AuditLog[]`
 获取某次会话的全部审计日志(按时间正序,用于复盘文档生成)。
 
-### `audit_stats() → { total, success, failed }`
+### `audit_stats() → { total, success, failed, unknown, pending }`
 
 ---
 
@@ -245,8 +227,9 @@ interface QuickAction {
 
 ### `upsert_quick_action(action: QuickAction) → void`
 ### `delete_quick_action(id: string) → void`
+### `execute_quick_action(action_id, server_id, expected_updated_at, user_confirmed) → QuickActionExecutionResult`
 
-> 快捷指令的**执行**由前端编排:解析 steps → 对每个 command 调 `execute_command`(source 传 `quick_action`)。
+> 快捷指令由后端读取用户预览过的版本并串行执行。guard 或普通步骤非零退出时停止后续步骤。
 
 ---
 
@@ -287,7 +270,7 @@ Agent 生成文档后调此存储。
 
 | 页面 | 调用的命令 |
 |---|---|
-| 服务器管理 | list_servers / create_server / connect_server / execute_command |
+| 服务器管理 | list_servers / create_server / connect_server / disconnect_server |
 | 终端 | terminal_open / terminal_input / terminal_resize / terminal_close + 事件监听 |
 | Agent 聊天 | agent_chat(LLM 代理流) + create/approve/reject/execute_agent_proposal + get_skill |
 | 审计日志 | query_audit_logs / get_session_audit_logs / audit_stats |
@@ -368,7 +351,7 @@ LLM 流式调用代理(OpenAI 兼容 `/chat/completions`,SSE)。命令立即返�
 ### Agent 提案审批状态机
 `create_agent_proposal(...) → prop_id` → `approve_agent_proposal(id)`(或 `reject_agent_proposal(id)`)
 → `execute_agent_proposal(id) → { proposal_id, result, audit_id }`。
-只有服务端批准的提案才能执行;`execute_command` 拒绝 `source=agent` 的前端直传调用。
+只有服务端批准的提案才能执行；应用不暴露可由前端伪造审计来源的通用命令入口。
 
 ---
 

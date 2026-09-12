@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import {
   Server, ServerInput, AuditLog, AuditFilter, Skill, QuickAction, QuickActionStep, Doc,
   ProviderSummary, ProviderInput, Container, ContainerAction, Service, ServerMetrics,
-  DirEntry, AuditContext, ExecuteResult
+  DirEntry, ExecuteResult
 } from '../types/backend';
 import * as ipc from '../lib/ipc';
 import type { AgentSessionInfo } from '../lib/ipc';
@@ -20,6 +20,7 @@ export interface AgentProposal {
   tool_name: string;
   server_id: number;
   approved?: boolean;
+  status?: 'pending' | 'running' | 'succeeded' | 'failed' | 'unknown' | 'rejected';
   result?: ExecuteResult;
   safe_to_run?: boolean;
   /** 原始工具调用(供执行后回填模型上下文) */
@@ -43,6 +44,7 @@ export interface PendingQuickAction {
   serverId: number;
   serverName: string;
   actionName: string;
+  actionUpdatedAt: string;
   /** 将要执行的命令列表(含是否需要单独确认的标记) */
   commands: { value: string; needsConfirm: boolean }[];
 }
@@ -89,7 +91,6 @@ interface AppContextType {
   addServer: (input: ServerInput) => Promise<void>;
   updateServer: (id: number, input: ServerInput) => Promise<void>;
   deleteServer: (id: number) => Promise<void>;
-  executeCommand: (serverId: number, command: string, ctx: AuditContext) => Promise<ExecuteResult>;
 
   // Terminals
   terminalTabs: TerminalTab[];
@@ -100,7 +101,7 @@ interface AppContextType {
 
   // Audit
   auditLogs: AuditLog[];
-  auditStats: { total: number; success: number; failed: number };
+  auditStats: { total: number; success: number; failed: number; unknown: number; pending: number };
   refreshAuditLogs: (filter?: AuditFilter) => Promise<void>;
   refreshAuditStats: () => Promise<void>;
 
@@ -191,7 +192,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const terminalTabsRef = useRef<TerminalTab[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [auditStats, setAuditStats] = useState({ total: 0, success: 0, failed: 0 });
+  const [auditStats, setAuditStats] = useState({ total: 0, success: 0, failed: 0, unknown: 0, pending: 0 });
   const [skills, setSkills] = useState<Skill[]>([]);
   const [quickActions, setQuickActions] = useState<QuickAction[]>([]);
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -337,15 +338,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try { await ipc.deleteServer(id); await refreshServers(); } catch (e) { handleError(e); }
   };
 
-  const executeCommand = async (serverId: number, command: string, ctx: AuditContext) => {
-    try {
-      const result = await ipc.executeCommand(serverId, command, ctx);
-      refreshAuditLogs();
-      refreshAuditStats();
-      return result;
-    } catch (e) { handleError(e); throw e; }
-  };
-
   // ============ Terminals ============
   const openTerminal = async (serverId: number, cols?: number, rows?: number) => {
     try {
@@ -434,39 +426,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try { await ipc.deleteQuickAction(id); await refreshQuickActions(); } catch (e) { handleError(e); }
   };
 
-  /** 实际执行步骤链(已获批准):guard 前置校验 + 逐步骤执行,全部走统一审计出口 */
-  const executeQuickActionSteps = async (
+  const executeQuickActionOnBackend = async (
     qa: QuickAction,
     serverId: number,
-    steps: QuickActionStep[],
-    approvedBy: string,
+    userConfirmed: boolean,
   ) => {
-    for (const step of steps) {
-      if (step.type !== 'command') continue;
-      // guard:执行前置条件检查,退出码非 0 立即中止整个流程
-      if (step.guard) {
-        try {
-          const guardResult = await executeCommand(serverId, step.guard, {
-            source: 'quick_action',
-            tool_name: 'quick_action_guard',
-            approved_by: approvedBy,
-          });
-          if (!guardResult.success) {
-            handleError(new Error(
-              `快捷指令 "${qa.name}" 守卫检查失败(${step.guard.slice(0, 60)}),已中止执行`
-            ));
-            return;
-          }
-        } catch (e) {
-          handleError(e);
-          return;
-        }
+    try {
+      const result = await ipc.executeQuickAction(qa.id, serverId, qa.updated_at, userConfirmed);
+      await Promise.all([refreshAuditLogs(), refreshAuditStats()]);
+      if (!result.success) {
+        const failed = result.steps[result.steps.length - 1];
+        handleError(new Error(
+          `快捷指令 "${qa.name}" 在第 ${(result.stopped_at ?? 0) + 1} 步停止（${failed?.kind ?? 'command'} 退出码 ${failed?.exit_code ?? '未知'}）`
+        ));
       }
-      await executeCommand(serverId, step.value, {
-        source: 'quick_action',
-        tool_name: 'run_quick_action',
-        approved_by: approvedBy,
-      });
+    } catch (e) {
+      handleError(e);
     }
   };
 
@@ -495,13 +470,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // - 其余 → 弹确认框,用户批准后才执行(approved_by = user:quick_action)
     const autoApprove = qa.approval === 'always_approve' && !commands.some(c => c.needsConfirm);
     if (autoApprove) {
-      await executeQuickActionSteps(qa, serverId, steps, 'policy:auto_review');
+      await executeQuickActionOnBackend(qa, serverId, false);
     } else {
       setPendingQuickAction({
         actionId,
         serverId,
         serverName: server?.name ?? `#${serverId}`,
         actionName: qa.name,
+        actionUpdatedAt: qa.updated_at,
         commands,
       });
     }
@@ -509,18 +485,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const confirmQuickAction = async () => {
     if (!pendingQuickAction) return;
-    const { actionId, serverId } = pendingQuickAction;
+    const { actionId, serverId, actionUpdatedAt } = pendingQuickAction;
     const qa = quickActions.find(a => a.id === actionId);
     setPendingQuickAction(null);
     if (!qa) return;
-    let steps: QuickActionStep[];
-    try {
-      steps = JSON.parse(qa.steps) as QuickActionStep[];
-    } catch {
-      handleError(new Error(`快捷指令 "${qa.name}" 的 steps 不是合法 JSON,无法执行`));
-      return;
-    }
-    await executeQuickActionSteps(qa, serverId, steps, 'user:quick_action');
+    await executeQuickActionOnBackend({ ...qa, updated_at: actionUpdatedAt }, serverId, true);
   };
 
   const cancelQuickAction = () => setPendingQuickAction(null);
@@ -699,7 +668,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       activeView, setActiveView, activeServerId, setActiveServerId,
       pendingHostKey, confirmHostKey, cancelHostKey,
       servers, connectedServerIds, refreshServers, connectServer, disconnectServer,
-      addServer, updateServer, deleteServer, executeCommand,
+      addServer, updateServer, deleteServer,
       terminalTabs, activeTerminalId, setActiveTerminalId, openTerminal, closeTerminal,
       auditLogs, auditStats, refreshAuditLogs, refreshAuditStats,
       skills, refreshSkills, upsertSkill, toggleSkill, deleteSkill,

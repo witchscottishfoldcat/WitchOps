@@ -1,7 +1,7 @@
 //! 运维命令:监控采集 / 容器管理 / systemd 服务管理
 //!
 //! 这些命令都走 SSH 在远程执行 shell 来采集数据或操作。
-//! 注意:命令执行走统一执行出口(经审计),这里用 execute_command 命令的内部逻辑。
+//! 注意:写操作调用内部统一执行器并由服务端构造审计上下文。
 //! 为简化,监控类只读查询直接用 ssh.run_command(不走审计,因为只读);
 //! 写操作(容器启停、服务管理)应走 execute_and_audit(留痕)。
 
@@ -144,29 +144,27 @@ fn parse_metrics(output: &str) -> AppResult<ServerMetrics> {
                         uptime_seconds = s.split('.').next().unwrap_or("0").parse().unwrap_or(0);
                     }
                 }
-                "disk" => {
+                "disk" if !line.starts_with("Filesystem") => {
                     // Filesystem 1024-blocks Used Available Capacity Mounted on
-                    if !line.starts_with("Filesystem") {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 6 {
-                            let total: u64 = parts[1].parse().unwrap_or(0);
-                            let used: u64 = parts[2].parse().unwrap_or(0);
-                            let avail: u64 = parts[3].parse().unwrap_or(0);
-                            let usage = if total > 0 {
-                                used as f64 / total as f64 * 100.0
-                            } else {
-                                0.0
-                            };
-                            let mount = parts[5..].join(" ");
-                            disks.push(DiskInfo {
-                                filesystem: parts[0].to_string(),
-                                mount,
-                                total,
-                                used,
-                                avail,
-                                usage_percent: usage,
-                            });
-                        }
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 6 {
+                        let total: u64 = parts[1].parse().unwrap_or(0);
+                        let used: u64 = parts[2].parse().unwrap_or(0);
+                        let avail: u64 = parts[3].parse().unwrap_or(0);
+                        let usage = if total > 0 {
+                            used as f64 / total as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        let mount = parts[5..].join(" ");
+                        disks.push(DiskInfo {
+                            filesystem: parts[0].to_string(),
+                            mount,
+                            total,
+                            used,
+                            avail,
+                            usage_percent: usage,
+                        });
                     }
                 }
                 _ => {}

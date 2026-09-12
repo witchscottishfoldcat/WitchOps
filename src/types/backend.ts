@@ -39,16 +39,6 @@ export interface ServerInput {
   note?: string;
 }
 
-export interface AuditContext {
-  source: 'agent' | 'manual_terminal' | 'quick_action' | 'mcp_external';
-  session_id?: string;
-  tool_name: string;
-  command?: string;
-  args?: string;
-  approved_by?: string;
-  proposal_id?: string;
-}
-
 export interface ExecuteResult {
   audit_id: number;
   stdout: string;
@@ -93,6 +83,7 @@ export interface AuditLog {
   exit_code: number | null;
   output: string | null;
   success: boolean;
+  outcome: 'pending' | 'succeeded' | 'failed' | 'unknown';
   approved_by: string | null;
   proposal_id: string | null;
   duration_ms: number | null;
@@ -132,6 +123,20 @@ export interface QuickAction {
   audit: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface QuickActionExecutionResult {
+  action_id: string;
+  success: boolean;
+  stopped_at: number | null;
+  steps: Array<{
+    step_index: number;
+    kind: 'guard' | 'command';
+    command: string;
+    audit_id: number;
+    exit_code: number;
+    success: boolean;
+  }>;
 }
 
 export interface Doc {

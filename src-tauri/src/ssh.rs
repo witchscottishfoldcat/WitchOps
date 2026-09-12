@@ -44,6 +44,12 @@ pub struct SshManager {
     sessions: Mutex<HashMap<i64, Arc<Mutex<SshSession>>>>,
 }
 
+impl Default for SshManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 一条已建立的 SSH 会话
 struct SshSession {
     /// russh 连接句柄
@@ -167,6 +173,7 @@ impl SshManager {
     }
 
     /// 建立连接(私钥认证)
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_with_key(
         &self,
         server_id: i64,

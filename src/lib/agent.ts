@@ -24,12 +24,16 @@ export interface AgentServer {
   id: number;
   name: string;
   host: string;
+  tags: string[];
 }
 
 export interface AgentSkillInfo {
   id: string;
   title: string;
   triggers: string[];
+  appliesTo: string[];
+  riskLevel: 'low' | 'medium' | 'high';
+  version: number;
 }
 
 export interface AgentToolCall {
@@ -186,9 +190,13 @@ export class AgentSession {
 
   /** 构建系统提示 */
   private systemPrompt(): string {
-    const serverList = this.servers.map(s => `- ${s.name} (id=${s.id}, host=${s.host})`).join('\n');
+    const serverList = this.servers.map(s =>
+      `- ${s.name} (id=${s.id}, host=${s.host}, tags=${s.tags.join(',') || 'none'})`
+    ).join('\n');
     const skillList = this.skills.length > 0
-      ? this.skills.map(s => `- ${s.id}: ${s.title}`).join('\n')
+      ? this.skills.map(s =>
+          `- ${s.id}@v${s.version}: ${s.title}; triggers=${s.triggers.join(',') || 'none'}; applies_to=${s.appliesTo.join(',') || 'all'}; risk=${s.riskLevel}`
+        ).join('\n')
       : '(无)';
     return `You are Witchcat Ops, an AI assistant for server operations.
 
@@ -202,6 +210,7 @@ Rules:
 - ALWAYS propose actions via tool calls. Never directly claim to have executed something.
 - Set safe_to_run=true only for read-only operations (read_file, get_metrics, get_skill, ls/cat/status).
 - For destructive or risky operations, set safe_to_run=false so the user reviews them.
+- Before using an SOP, check applies_to against the target server tags and call get_skill for the exact published version shown above.
 - Be concise. When a command completes, summarize the result.
 - If the user asks about a server not in the list, say so.`;
   }
@@ -362,17 +371,34 @@ export async function loadEnabledSkills(): Promise<AgentSkillInfo[]> {
   const skills = await ipc.listEnabledSkills();
   return skills.map(s => {
     let triggers: string[] = [];
+    let appliesTo: string[] = [];
     if (s.triggers) {
       try { triggers = JSON.parse(s.triggers); } catch { triggers = []; }
     }
-    return { id: s.id, title: s.title, triggers };
+    if (s.applies_to) {
+      try { appliesTo = JSON.parse(s.applies_to); } catch { appliesTo = []; }
+    }
+    return {
+      id: s.id,
+      title: s.title,
+      triggers,
+      appliesTo,
+      riskLevel: s.risk_level,
+      version: s.version,
+    };
   });
 }
 
 /** 加载服务器列表 */
 export async function loadAgentServers(): Promise<AgentServer[]> {
   const servers = await ipc.listServers();
-  return servers.map(s => ({ id: s.id, name: s.name, host: s.host }));
+  return servers.map(s => {
+    let tags: string[] = [];
+    if (s.tags) {
+      try { tags = JSON.parse(s.tags); } catch { tags = []; }
+    }
+    return { id: s.id, name: s.name, host: s.host, tags };
+  });
 }
 
 /** 执行 get_skill 工具(从后端加载技能内容) */

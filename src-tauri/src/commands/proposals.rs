@@ -3,8 +3,8 @@
 //! 安全设计(修复「前端伪造审批」漏洞):
 //! - 前端只能:创建提案([`create_agent_proposal`])、请求批准([`approve_agent_proposal`])、请求拒绝([`reject_agent_proposal`]);
 //! - 执行唯一合法入口是 [`execute_agent_proposal`]:校验提案必须处于 approved 状态,
-//!   且执行前先原子地把状态改为 executed(先标记后执行),防止并发重复执行危险命令;
-//! - [`crate::commands::execute_command`] 拒绝 source="agent" 的前端直传调用,
+//!   且执行前先原子地把状态改为 running,防止并发重复执行危险命令;
+//! - 不暴露接受任意命令和审计来源的通用 IPC；
 //!   审计上下文(source / approved_by / proposal_id)完全由服务端构建。
 
 use serde::Serialize;
@@ -160,10 +160,10 @@ pub async fn reject_agent_proposal(state: State<'_, AppState>, id: String) -> Ap
 
 /// 执行已批准的提案(Agent 提案的唯一执行入口)
 ///
-/// 流程:加载提案 → 校验 approved → **原子占位 executed** → 执行 → 返回结果。
+/// 流程:加载提案 → 校验 approved → **原子占位 running** → 执行 → 持久化最终结果。
 ///
 /// 为什么要「先标记后执行」:两个并发 execute 调用同时通过状态校验后,
-/// 只有一个能把 approved → executed 改成功(单条 UPDATE 原子,SQLite 串行化写),
+/// 只有一个能把 approved → running 改成功(单条 UPDATE 原子,SQLite 串行化写),
 /// 另一个 rows_affected=0 直接报错退出 —— 危险命令绝不会被执行两次。
 #[tauri::command]
 pub async fn execute_agent_proposal(
@@ -195,24 +195,30 @@ pub async fn execute_agent_proposal(
         )));
     }
 
-    // 原子占位(见函数注释):先改状态再执行,防并发重复执行
+    // 原子占位(见函数注释):先改为 running 再执行,防并发重复执行。
+    // 应用在远程命令返回前退出时会留下 running；下次启动可将它作为待核对状态处理，
+    // 绝不能把“已开始”误报成“已成功”。
     let claim = sqlx::query(
-        "UPDATE agent_proposals SET status='executed' WHERE id = ? AND status='approved'",
+        "UPDATE agent_proposals
+         SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+             finished_at=NULL, execution_error=NULL, audit_id=NULL, exit_code=NULL
+         WHERE id = ? AND status='approved'",
     )
     .bind(&id)
     .execute(state.db())
     .await?;
     if claim.rows_affected() != 1 {
         return Err(AppError::InvalidInput(format!(
-            "提案 {id} 已执行或状态非法,拒绝重复执行"
+            "提案 {id} 已在执行、已完成或状态非法,拒绝重复执行"
         )));
     }
 
-    let server_id = row
-        .server_id
-        .ok_or_else(|| AppError::InvalidInput(format!("提案 {id} 缺少目标服务器")))?;
+    let execution: AppResult<AgentExecutionResult> = async {
+        let server_id = row
+            .server_id
+            .ok_or_else(|| AppError::InvalidInput(format!("提案 {id} 缺少目标服务器")))?;
 
-    match row.tool_name.as_str() {
+        match row.tool_name.as_str() {
         "run_command" => {
             let cmd = row
                 .command
@@ -286,5 +292,50 @@ pub async fn execute_agent_proposal(
         other => Err(AppError::InvalidInput(format!(
             "提案 {id} 的工具类型 {other} 不可执行"
         ))),
+        }
+    }
+    .await;
+
+    match execution {
+        Ok(done) => {
+            let status = if done.result.success() { "succeeded" } else { "failed" };
+            sqlx::query(
+                "UPDATE agent_proposals
+                 SET status=?, finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                     execution_error=?, audit_id=?, exit_code=?
+                 WHERE id=? AND status='running'",
+            )
+            .bind(status)
+            .bind(if done.result.success() {
+                None::<String>
+            } else {
+                Some(format!("远程命令退出码为 {}", done.result.exit_code))
+            })
+            .bind(done.audit_id)
+            .bind(done.result.exit_code)
+            .bind(&id)
+            .execute(state.db())
+            .await?;
+            Ok(done)
+        }
+        Err(error) => {
+            // 领取成功后出现错误时，SSH/SFTP 操作可能已经发送到远端。
+            // 在缺少远端幂等键的情况下只能标 unknown，禁止把它自动重试成第二次变更。
+            let message = error.to_string();
+            if let Err(db_error) = sqlx::query(
+                "UPDATE agent_proposals
+                 SET status='unknown', finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                     execution_error=?
+                 WHERE id=? AND status='running'",
+            )
+            .bind(&message)
+            .bind(&id)
+            .execute(state.db())
+            .await
+            {
+                log::error!("提案 {id} 执行失败后无法持久化 unknown 状态: {db_error}");
+            }
+            Err(error)
+        }
     }
 }

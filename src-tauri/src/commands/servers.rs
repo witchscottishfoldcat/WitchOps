@@ -3,7 +3,6 @@
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::executor::{execute_and_audit, AuditContext};
 use crate::models::{Server, ServerInput};
 use crate::AppState;
 
@@ -233,42 +232,4 @@ pub async fn server_connection_status(
     id: i64,
 ) -> AppResult<bool> {
     Ok(state.ssh.is_connected(id).await)
-}
-
-/// 在服务器上执行命令(经统一执行出口,自动审计)
-///
-/// 这是 手动终端 / 快捷指令 共同使用的入口。
-/// Agent 命令不在此执行:见 [`crate::commands::execute_agent_proposal`]。
-#[tauri::command]
-pub async fn execute_command(
-    state: State<'_, AppState>,
-    server_id: i64,
-    command: String,
-    ctx: AuditContext,
-) -> AppResult<serde_json::Value> {
-    // 安全闸门:Agent 命令必须经 execute_agent_proposal(服务端审批状态机)执行。
-    // 前端直传的 agent 审计上下文不可信 —— 被攻破的渲染进程可以伪造
-    // approved_by / proposal_id 谎称已获批准,这里一律拒绝。
-    if ctx.source == "agent" {
-        return Err(AppError::InvalidInput(
-            "Agent 命令必须经 execute_agent_proposal 执行,前端直传的 agent 审计上下文不可信".into(),
-        ));
-    }
-
-    let server = sqlx::query_as::<_, Server>("SELECT * FROM servers WHERE id = ?")
-        .bind(server_id)
-        .fetch_optional(state.db())
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("服务器 {server_id}")))?;
-
-    let (result, audit_id) =
-        execute_and_audit(&state.ssh, state.db(), server_id, &server.host, &command, &ctx).await?;
-
-    Ok(serde_json::json!({
-        "audit_id": audit_id,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "exit_code": result.exit_code,
-        "success": result.success(),
-    }))
 }

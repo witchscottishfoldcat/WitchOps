@@ -421,6 +421,7 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
         safe_to_run: call.arguments.safe_to_run as boolean | undefined,
         toolCall: { id: call.id, name: call.name, arguments: call.arguments },
         droppedToolCalls: turn.toolCalls.length - 1,
+        status: 'pending',
       };
     } else if (call.name === 'write_file') {
       const sid = validateServerId(call.arguments.server_id);
@@ -454,6 +455,7 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
         server_id: sid,
         toolCall: { id: call.id, name: call.name, arguments: call.arguments },
         droppedToolCalls: turn.toolCalls.length - 1,
+        status: 'pending',
       };
     } else {
       // 未知写工具
@@ -547,13 +549,6 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
     const toolCall = proposal.toolCall;
     if (!toolCall) return;
 
-    updateMessages(messagesRef.current.map(m => m.proposal?.id === proposalId ? {
-      ...m, proposal: { ...m.proposal!, approved: true }
-    } : m));
-    // 审批状态变化 → 重新落盘(幂等 guard 检测到内容变化会放行,
-    // 后端按 id 去重取最后一条),否则重载后该 proposal 又变回"待审批"
-    finalizeMessage(msg.id);
-
     setIsRunning(true);
     const resultMsgId = nextId('msg_agent');
     updateMessages([...messagesRef.current, {
@@ -563,15 +558,18 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
 
     try {
       let resultText: string;
-      let execResult: ExecuteResult | undefined;
 
       if (proposal.tool_name === 'run_command' || proposal.tool_name === 'write_file') {
         // 服务端审批状态机:先批准,再经 execute_agent_proposal 执行。
         // 后端校验提案必须处于 approved 状态才执行,审批上下文由服务端构建,
         // 前端无法伪造;write_file 的 SFTP 写入也由后端完成。
         await ipc.approveAgentProposal(proposalId);
+        updateMessages(messagesRef.current.map(m => m.proposal?.id === proposalId ? {
+          ...m, proposal: { ...m.proposal!, approved: true, status: 'running' }
+        } : m));
+        finalizeMessage(msg.id);
         const res = await ipc.executeAgentProposal(proposalId);
-        execResult = {
+        const execResult: ExecuteResult = {
           audit_id: res.audit_id,
           stdout: res.result.stdout,
           stderr: res.result.stderr,
@@ -579,7 +577,11 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
           success: res.result.exit_code === 0,
         };
         updateMessages(messagesRef.current.map(m => m.proposal?.id === proposalId ? {
-          ...m, proposal: { ...m.proposal!, result: execResult }
+          ...m, proposal: {
+            ...m.proposal!,
+            result: execResult,
+            status: execResult.success ? 'succeeded' : 'failed',
+          }
         } : m));
         finalizeMessage(msg.id); // 执行结果写回 proposal,同样需要重新落盘
         if (proposal.tool_name === 'write_file') {
@@ -616,20 +618,28 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
         await session.sendMessage(resultText, callbacks);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : (err && typeof err === 'object' && 'message' in err) ? String((err as any).message) : String(err);
-      updateMessages(messagesRef.current.map(m => m.id === resultMsgId ? { ...m, content: `错误: ${msg}`, streaming: false } : m));
+      const errorMessage = err instanceof Error ? err.message : (err && typeof err === 'object' && 'message' in err) ? String((err as any).message) : String(err);
+      updateMessages(messagesRef.current.map(m => {
+        if (m.id === resultMsgId) return { ...m, content: `错误: ${errorMessage}`, streaming: false };
+        if (m.proposal?.id === proposalId && m.proposal.approved) {
+          return { ...m, proposal: { ...m.proposal, status: 'unknown' as const } };
+        }
+        return m;
+      }));
+      finalizeMessage(msg.id);
       finalizeMessage(resultMsgId);
       setIsRunning(false);
     }
   };
 
   const handleReject = async (proposalId: string) => {
-    // 服务端状态机:rejected 落库。已批准/已执行的提案后端会拒绝此调用,
-    // 这里只告警不阻断 —— UI 状态更新照常执行。
+    // 以后端状态为准：拒绝失败时不能把本地 UI 伪装成已拒绝。
     try {
       await ipc.rejectAgentProposal(proposalId);
     } catch (e) {
-      console.warn('[Agent] 拒绝提案失败', e);
+      const error = e instanceof Error ? e : new Error(String(e));
+      ipc.frontendLog(`[Agent] 拒绝提案失败: ${error.message}`);
+      return;
     }
     let msgId = '';
     // 不在 setState updater 里捕获 msgId(updater 必须纯净,StrictMode 会双调);
@@ -637,7 +647,7 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
     const next = messagesRef.current.map(m => {
       if (m.proposal?.id === proposalId) {
         msgId = m.id;
-        return { ...m, proposal: { ...m.proposal!, approved: false } };
+        return { ...m, proposal: { ...m.proposal!, approved: false, status: 'rejected' as const } };
       }
       return m;
     });
@@ -649,23 +659,32 @@ export const AgentChatPanel: React.FC<{ compact?: boolean; sessionId?: string | 
 
   /** 将当前对话存为复盘文档 */
   const handleSaveAsDoc = async (title: string) => {
+    const currentSessionId = sessionIdRef.current;
+    const auditEvidence = currentSessionId
+      ? await ipc.getSessionAuditLogs(currentSessionId)
+      : [];
     const transcript = messages
       .filter(m => m.sender !== 'system')
       .map(m => {
         const time = m.timestamp;
         if (m.sender === 'user') return `## [${time}] 用户\n${m.content}`;
-        const prop = m.proposal ? `\n\n> 提议: ${m.proposal.command}${m.proposal.result ? `(退出码:${m.proposal.result.exit_code})` : ''}` : '';
+        const prop = m.proposal
+          ? `\n\n> 操作提案: ${m.proposal.tool_name}${m.proposal.result ? `（审计 #${m.proposal.result.audit_id}，退出码 ${m.proposal.result.exit_code}）` : `（${m.proposal.status ?? 'pending'}）`}`
+          : '';
         return `## [${time}] Agent\n${m.content}${prop}`;
       })
       .join('\n\n---\n\n');
 
-    const content = `# 运维复盘: ${title}\n\n> 由 Witchcat Agent 对话沉淀生成\n\n${transcript}`;
+    const evidenceRows = auditEvidence.length > 0
+      ? auditEvidence.map(log => `| #${log.id} | ${new Date(log.timestamp).toLocaleString()} | ${log.tool_name} | ${log.outcome} | ${log.exit_code ?? '-'} |`).join('\n')
+      : '| - | - | 无关联审计 | unknown | - |';
+    const content = `# 运维复盘: ${title}\n\n> 由 Witchcat Agent 会话生成的草稿。当前结论状态：待人工验证和审核。\n\n## 结果判定\n\n- 业务目标是否达成：待验证\n- 是否发生回退：待确认\n- 复盘状态：draft\n\n## 审计证据\n\n| 审计 ID | 时间 | 工具 | 结果 | 退出码 |\n| --- | --- | --- | --- | --- |\n${evidenceRows}\n\n## 对话记录\n\n${transcript}`;
     await upsertDoc({
       id: `doc_${Date.now()}`,
       type: 'postmortem',
       title,
       content,
-      session_id: null,
+      session_id: currentSessionId,
       server_id: activeServerId,
       generated_by: 'agent',
       tags: JSON.stringify(['agent-session']),
@@ -898,8 +917,12 @@ const ProposalCard: React.FC<{
         </div>
       )}
       {proposal.approved === true && (
-        <div style={{ color: 'var(--accent-emerald)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
-          <Check size={14} /> 已批准并执行
+        <div style={{ color: proposal.status === 'failed' || proposal.status === 'unknown' ? 'var(--accent-rose)' : 'var(--accent-emerald)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+          {proposal.status === 'running' && <><Loader2 size={14} className="spin" /> 执行中</>}
+          {proposal.status === 'failed' && <><X size={14} /> 执行失败</>}
+          {proposal.status === 'unknown' && <><AlertCircle size={14} /> 结果未知，请人工核对后再操作</>}
+          {proposal.status === 'succeeded' && <><Check size={14} /> 执行成功</>}
+          {!proposal.status && <><Check size={14} /> 已批准并执行</>}
         </div>
       )}
       {proposal.approved === false && (

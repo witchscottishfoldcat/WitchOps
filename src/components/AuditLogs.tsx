@@ -1,21 +1,22 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AuditLog, AuditFilter } from '../types/backend';
-import { ShieldCheck, Search, CheckCircle, XCircle, Terminal, Eye } from 'lucide-react';
+import { ShieldCheck, Search, CheckCircle, XCircle, Terminal, Eye, AlertCircle } from 'lucide-react';
 
 export const AuditLogs: React.FC = () => {
-  const { auditStats, auditLogs, servers } = useApp();
+  const { auditStats, auditLogs, servers, refreshAuditLogs } = useApp();
   const [filter, setFilter] = useState<AuditFilter>({});
   const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
 
-  // 前端本地过滤(后端已返回全部日志)
-  const logs = auditLogs.filter(log => {
-    if (filter.server_id && log.server_id !== filter.server_id) return false;
-    if (filter.source && log.source !== filter.source) return false;
-    if (filter.success !== undefined && log.success !== filter.success) return false;
-    if (filter.search && log.command && !log.command.toLowerCase().includes(filter.search.toLowerCase())) return false;
-    return true;
-  });
+  // 把筛选交给后端，搜索覆盖整个审计表；短暂防抖避免每次按键都查询。
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      refreshAuditLogs({ ...filter, limit: 100, offset: 0 });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [filter, refreshAuditLogs]);
+
+  const logs = auditLogs;
 
   return (
     <div>
@@ -25,12 +26,12 @@ export const AuditLogs: React.FC = () => {
             <ShieldCheck size={24} style={{ color: 'var(--accent-emerald)' }} />
             审计日志 (Unified Audit Trail - 需求1)
           </h2>
-          <p className="page-subtitle">记录所有来自于 Agent、手动终端、快捷指令与 MCP 外部调用的指令与完整 stdout/stderr。</p>
+          <p className="page-subtitle">记录 Agent、快捷指令、服务控制与 SFTP 操作；输出保存受限摘要，结果未知时需要人工核对。</p>
         </div>
       </div>
 
       {/* Audit Stats Header */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 16, marginBottom: 20 }}>
         <div className="glass-card" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ background: 'var(--info-bg)', padding: 10, borderRadius: 8, color: 'var(--accent-cyan)' }}>
             <Terminal size={22} />
@@ -58,6 +59,15 @@ export const AuditLogs: React.FC = () => {
           <div>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>异常与被拦截</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent-rose)' }}>{auditStats.failed} 次</div>
+          </div>
+        </div>
+        <div className="glass-card" style={{ display: 'flex', alignItems: 'center', gap: 14, borderLeft: '4px solid var(--accent-amber)' }}>
+          <div style={{ background: 'rgba(245, 158, 11, 0.15)', padding: 10, borderRadius: 8, color: 'var(--accent-amber)' }}>
+            <AlertCircle size={22} />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>待核对 / 执行中</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent-amber)' }}>{auditStats.unknown + auditStats.pending} 次</div>
           </div>
         </div>
       </div>
@@ -147,9 +157,17 @@ export const AuditLogs: React.FC = () => {
                 </td>
                 <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{log.duration_ms} ms</td>
                 <td>
-                  {log.success ? (
+                  {log.outcome === 'succeeded' ? (
                     <span style={{ color: 'var(--accent-emerald)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
                       <CheckCircle size={14} /> 成功
+                    </span>
+                  ) : log.outcome === 'pending' ? (
+                    <span style={{ color: 'var(--accent-amber)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <AlertCircle size={14} /> 执行中
+                    </span>
+                  ) : log.outcome === 'unknown' ? (
+                    <span style={{ color: 'var(--accent-amber)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <AlertCircle size={14} /> 待核对
                     </span>
                   ) : (
                     <span style={{ color: 'var(--accent-rose)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -186,6 +204,7 @@ export const AuditLogs: React.FC = () => {
               <div><strong>审批来源:</strong> {selectedLog.approved_by || '无'}</div>
               <div><strong>会话 ID:</strong> {selectedLog.session_id || '无'}</div>
               <div><strong>耗时:</strong> {selectedLog.duration_ms} ms</div>
+              <div><strong>结果状态:</strong> {selectedLog.outcome}</div>
             </div>
 
             <div style={{ marginBottom: 12 }}>
