@@ -8,6 +8,7 @@
 //! - `knowledge`: 审计日志 / Skills / 快捷指令 / 文档沉淀
 //! - `sftp`:      SFTP 文件操作
 //! - `ops`:       监控 / 容器 / systemd 运维命令
+//! - `updates`:   应用更新检查(GitHub Releases)
 //!
 //! 注:terminal(交互式终端流)是顶层模块,在 lib.rs 直接声明
 
@@ -19,6 +20,7 @@ pub mod providers;
 pub mod servers;
 pub mod sessions;
 pub mod sftp;
+pub mod updates;
 pub mod vault;
 
 // 重新导出所有命令函数(供 lib.rs 的 generate_handler! 使用)
@@ -30,4 +32,5 @@ pub use providers::*;
 pub use servers::*;
 pub use sessions::*;
 pub use sftp::*;
+pub use updates::*;
 pub use vault::*;

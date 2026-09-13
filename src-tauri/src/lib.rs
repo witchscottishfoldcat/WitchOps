@@ -314,6 +314,8 @@ pub fn run() {
             commands::control_container,
             commands::list_services,
             commands::control_service,
+            // 应用更新检查(GitHub Releases)
+            commands::check_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

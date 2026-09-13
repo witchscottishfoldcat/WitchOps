@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { ProviderInput, ProviderSummary } from '../types/backend';
-import { Settings, Plus, Trash2, Cpu, Lock, Pencil } from 'lucide-react';
+import { ProviderInput, ProviderSummary, UpdateCheckResult } from '../types/backend';
+import { Settings, Plus, Trash2, Cpu, Lock, Pencil, RefreshCw, CheckCircle2, ArrowUpCircle, AlertCircle, ExternalLink } from 'lucide-react';
+import { getVersion } from '@tauri-apps/api/app';
 import { VaultModal } from './VaultModal';
+import { checkAppUpdate } from '../lib/ipc';
 
 /** 安全 JSON 解析:渲染期非法 JSON 返回 null,避免白屏 */
 function safeParse<T>(raw: string | null): T | null {
@@ -34,6 +36,51 @@ export const SettingsManager: React.FC = () => {
   });
 
   const isEditing = editingProvider !== null;
+
+  // ============ 软件更新(手动检查 GitHub Releases) ============
+  const [appVersion, setAppVersion] = useState<string>('dev');
+  const [checking, setChecking] = useState(false);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // getVersion 在非 Tauri 环境会同步抛错,先包一层
+    let promise: Promise<string>;
+    try {
+      promise = getVersion();
+    } catch {
+      promise = Promise.resolve('dev');
+    }
+    promise
+      .then(v => { if (!cancelled) setAppVersion(v); })
+      .catch(() => { if (!cancelled) setAppVersion('dev'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleCheckUpdate = async () => {
+    setChecking(true);
+    setUpdateError(null);
+    setUpdateResult(null);
+    try {
+      setUpdateResult(await checkAppUpdate());
+    } catch (e) {
+      // 后端错误形如 {code,message};纯 Web 预览为 Error
+      setUpdateError(e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  /** 打开发布页:Tauri 内走 opener 插件,纯 Web 预览退化为 window.open */
+  const openReleasePage = async (url: string) => {
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(url);
+    } catch {
+      window.open(url, '_blank', 'noopener');
+    }
+  };
 
   const openCreate = () => {
     setEditingProvider(null);
@@ -89,6 +136,50 @@ export const SettingsManager: React.FC = () => {
 
       {/* Vault Security Status Banner */}
       <VaultModal />
+
+      {/* 软件更新(手动检查 GitHub Releases) */}
+      <div className="glass-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, marginTop: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, background: 'var(--chip-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <RefreshCw size={18} style={{ color: 'var(--accent-purple)' }} />
+          </div>
+          <div>
+            <h4 style={{ fontSize: 14, fontWeight: 700 }}>软件更新</h4>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              当前版本 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>v{appVersion}</span>
+              {updateResult && (
+                <> · 最新发布 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>v{updateResult.latest_version}</span></>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {updateError && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--accent-rose)' }}>
+              <AlertCircle size={14} /> {updateError}
+            </span>
+          )}
+          {updateResult && !updateError && !updateResult.update_available && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--accent-emerald)' }}>
+              <CheckCircle2 size={14} /> 已是最新版本
+            </span>
+          )}
+          {updateResult?.update_available && (
+            <>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--accent-emerald)', fontWeight: 600 }}>
+                <ArrowUpCircle size={14} /> 发现新版本 v{updateResult.latest_version}
+              </span>
+              <button className="btn btn-primary" onClick={() => openReleasePage(updateResult.release_url)}>
+                <ExternalLink size={14} /> 前往下载
+              </button>
+            </>
+          )}
+          <button className="btn btn-secondary" onClick={handleCheckUpdate} disabled={checking}>
+            <RefreshCw size={14} style={{ animation: checking ? 'spin 1s linear infinite' : 'none' }} /> {checking ? '检查中…' : '检查更新'}
+          </button>
+        </div>
+      </div>
 
       {/* LLM Providers Section */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 24 }}>

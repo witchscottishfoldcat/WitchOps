@@ -254,6 +254,15 @@ export interface Service {
   name: string;
   load_state: string;
   active_state: string; // active / inactive / failed
-  sub_state: string;
+  sub_state: string; // running / dead / ...
   description: string;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_tag: string;
+  latest_version: string;
+  release_url: string;
+  published_at: string | null;
+  update_available: boolean;
 }

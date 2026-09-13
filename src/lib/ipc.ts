@@ -8,7 +8,7 @@ import type {
   Server, ServerInput, AuditLog, AuditFilter, Skill, QuickAction, Doc,
   ProviderSummary, ProviderInput, Container, ContainerAction, Service, ServerMetrics,
   DirEntry, ExecuteResult, AgentExecutionResult, QuickActionExecutionResult,
-  ChatRequest, ChatEvent,
+  ChatRequest, ChatEvent, UpdateCheckResult,
 } from '../types/backend';
 
 // ============ 纯 Web 预览降级 ============
@@ -231,6 +231,11 @@ export const onTerminalExit = (
 /** 前端日志桥:关键节点打到后端日志(排查用) */
 export const frontendLog = (msg: string) =>
   invoke<void>('frontend_log', { msg }).catch(() => {});
+
+// ============ 应用更新 ============
+/** 检查 GitHub Releases 是否有新版本(手动触发,不走后台轮询) */
+export const checkAppUpdate = () =>
+  invoke<UpdateCheckResult>('check_app_update');
 
 // ============ Agent 会话持久化 ============
 export interface StoredMessage {

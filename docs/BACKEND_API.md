@@ -519,3 +519,21 @@ interface Service {
 ### `control_service(server_id: number, service_name: string, action: string, session_id?: string) → ExecuteResult`
 `action`: `start` / `stop` / `restart` / `enable` / `disable` / `status`。
 > 服务操作也走统一执行出口,写审计日志。
+
+---
+
+## 十三、应用更新检查
+
+### `check_app_update() → UpdateCheckResult`
+```ts
+interface UpdateCheckResult {
+  current_version: string   // 编译期 CARGO_PKG_VERSION
+  latest_tag: string        // 如 'v0.1.0'
+  latest_version: string    // tag 去 v 前缀,如 '0.1.0'
+  release_url: string       // GitHub 发布页(已校验为本仓库域)
+  published_at: string | null
+  update_available: boolean // 语义化版本比较(major.minor.patch)
+}
+```
+> 后端直连 GitHub Releases(10s 超时,无需凭证);设置页手动触发,不做后台轮询。
+> 版本号不规范(非 `v?X.Y.Z`)时按"无更新"处理,不误报。
