@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="public/logo.svg" width="96" alt="Witchcat Ops Logo" />
+  <img src="public/logo.png" width="96" alt="Witchcat Ops Logo" />
 
   # Witchcat Ops
 
@@ -72,11 +72,13 @@ pnpm tauri build
 
 ### 重新生成图标
 
-Logo 源稿是 `public/logo.svg`(终端光标 `>_` 标)。全套 PNG/ICO 由脚本程序化绘制:
+当前图标源稿是 `public/logo.png`(256×256 带透明通道)。全套平台图标由 Tauri CLI 生成:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/gen-icon.ps1
+```bash
+npx tauri icon public/logo.png
 ```
+
+`src-tauri/icons/icon.ico` 为外部提供的成品文件(内含 16~256 六档尺寸),如需替换请直接覆盖该文件,不要用生成器重采样。旧版 `scripts/gen-icon.ps1`(基于 `public/logo.svg` 绘制终端光标 `>_` 标)已不再使用,保留仅作历史参考。
 
 ### Windows 特殊说明(WDAC)
 

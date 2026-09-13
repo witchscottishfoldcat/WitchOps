@@ -81,7 +81,7 @@ export const Header: React.FC = () => {
         </div>
 
         <div className="brand-logo" data-tauri-drag-region>
-          <img src="/logo.svg" alt="Witchcat" style={{ width: 22, height: 22, borderRadius: 6 }} draggable={false} />
+          <img src="/logo.png" alt="Witchcat" style={{ width: 22, height: 22, borderRadius: 6 }} draggable={false} />
           <span>Witchcat<span style={{ color: 'var(--apple-purple)', marginLeft: 2 }}>Ops</span></span>
           <span style={{ fontSize: 10, background: 'rgba(191, 90, 242, 0.15)', color: 'var(--apple-purple)', padding: '1px 6px', borderRadius: 10, marginLeft: 4, fontWeight: 600 }}>
             v{appVersion}
