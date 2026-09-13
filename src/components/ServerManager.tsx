@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Server, ServerInput } from '../types/backend';
 import { Server as ServerIcon, Plus, Terminal, Power, Tag, Trash2, Eye, EyeOff, X, Lock, KeyRound, ShieldCheck, ShieldAlert, Edit } from 'lucide-react';
@@ -21,6 +21,11 @@ export const ServerManager: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+
+  // 输入框内按住拖动选中文本时,mouseup 可能落在遮罩上;此时浏览器把 click 派发到共同祖先(遮罩),
+  // 仅凭 stopPropagation 拦不住。只有按下与抬起都发生在遮罩本身,才视为"点击外部关闭"。
+  const overlayMouseDown = useRef(false);
+  const overlayMouseUp = useRef(false);
 
   // 两步确认:3 秒后自动复位
   useEffect(() => {
@@ -271,7 +276,12 @@ export const ServerManager: React.FC = () => {
 
       {/* Add Server Modal — 苹果风表单 */}
       {showAddModal && (
-        <div className="modal-overlay" onClick={closeModal}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { overlayMouseDown.current = e.target === e.currentTarget; }}
+          onMouseUp={e => { overlayMouseUp.current = e.target === e.currentTarget; }}
+          onClick={() => { if (overlayMouseDown.current && overlayMouseUp.current) closeModal(); }}
+        >
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: 520 }}>
             {/* 标题栏 */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
