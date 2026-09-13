@@ -1,6 +1,6 @@
 [package]
 name = "witchcat-ops"
-version = "0.1.0"
+version = "1.0.0"
 description = "Witchcat Ops — AI Agent 服务器运维工具(后端)"
 authors = ["witchcat"]
 edition = "2021"
